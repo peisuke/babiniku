@@ -1,13 +1,14 @@
 import pyaudio
 import time
 import numpy as np
+from scipy.stats import norm
 import threading
 import librosa
 import pyworld
 
 def convert(signal):
     f0_rate = 2.4
-    sp_rate = 0.8
+    sp_rate = 0.78
     sample_rate = 16000
 
     f0, t = pyworld.dio(signal, sample_rate)
@@ -40,11 +41,9 @@ class WorkerThread(threading.Thread):
         self.lock = threading.Lock()
         self.buffer = []
         self.result = []
-        
-        self.prev_sample = None
-        self.block_length = block_length
-        self.margin_length = margin_length
 
+        self.prev_samples = []
+        
     def stop(self):
         self.is_stop = True
         self.join()
@@ -55,54 +54,53 @@ class WorkerThread(threading.Thread):
                 with self.lock:
                     buf = self.buffer[0]
                     self.buffer = self.buffer[1:]
-
+               
+                chunk_size = len(buf[0]['data'])
                 sample = np.concatenate([b['data'] for b in buf])
 
                 # pitch sift
                 sample = sample.astype(np.float64)
                 sample = convert(sample)
 
-                ###############
                 # overlap
-                current_sample = sample
+                self.prev_samples.append(sample)
 
-                if self.prev_sample is None:
-                    sample = current_sample.copy()
-                else:
-                    sample = current_sample.copy()
-                    prev_sample = self.prev_sample
+                length = len(sample)
+                weight = norm.pdf(np.arange(0, length), length/2, length/8)
 
-                    chunk_size = sample.shape[0] // self.block_length
-                    margin_size = chunk_size * self.margin_length
+                caches = []
+                wcaches = []
+                for i, sample in enumerate(self.prev_samples):
+                    pos = (len(self.prev_samples) - i) * chunk_size
+                    if len(sample) >= pos + chunk_size:
+                        cache = sample[pos:pos+chunk_size]
+                        wcache = weight[pos:pos+chunk_size]
+                        caches.append(cache)
+                        wcaches.append(wcache)
 
-                    cw = np.arange(0, 1, 1 / (2*margin_size))
-                    pw = np.ones_like(cw) - cw
-                    len_overlapped = len(cw)
-                    sample[:len_overlapped] = pw * prev_sample[-len_overlapped:] + cw * current_sample[:len_overlapped]
-                    
-                self.prev_sample = current_sample.copy()
-                ########
+                caches = np.asarray(caches)
+                wcaches = np.asarray(wcaches)
+                wcaches /= wcaches.sum(axis=0)
+                sample = np.sum(wcaches * caches, axis=0)
+
+                if len(self.prev_samples) >= 16:
+                    self.prev_samples = self.prev_samples[1:]
             
-                sample = sample.astype(np.int16)
-                
-                sample = sample.reshape(self.block_length, -1)
-                buf = [{'data': s, 'index': b['index']} for b, s in zip(buf, sample)]
-
                 with self.lock:
-                    self.result.append(buf[self.margin_length:-self.margin_length])
-
-            time.sleep(0.01)
+                    self.result.extend(sample.tolist())
+            else:
+                time.sleep(0.01)
 
     def push_chunk(self, chunk):
         with self.lock:
             self.buffer.append(chunk)
     
-    def pop_chunk(self):
-        result = [] 
+    def pop_chunk(self, chunk_size):
+        result = None
         with self.lock:
-            if len(self.result) > 0:
-                result.extend(self.result)
-                self.result = []
+            if len(self.result) >= chunk_size:
+                result = np.array(self.result[:chunk_size])
+                self.result = self.result[chunk_size:]
 
         return result
 
@@ -118,6 +116,7 @@ class AudioFilter():
                         format=self.format,
                         channels=self.channels,
                         rate=self.rate,
+                        frames_per_buffer=1024,
                         input_device_index = input_index,
                         output_device_index = output_index,
                         output=True,
@@ -137,7 +136,7 @@ class AudioFilter():
     def get_channels(self, p):
         input_index = self.p.get_default_input_device_info()['index']
         output_index = self.p.get_default_output_device_info()['index']
-        output_index = p.get_default_output_device_info()['index']
+        #output_index = p.get_default_output_device_info()['index']
         for idx in range(self.p.get_device_count()):
             info = self.p.get_device_info_by_index(idx)
             if 'BlackHole' in info['name']:
@@ -146,11 +145,15 @@ class AudioFilter():
 
     def callback(self, in_data, frame_count, time_info, status):
         decoded_data = np.frombuffer(in_data, np.int16).copy()
+        chunk_size = len(decoded_data)
 
-        self.chunk.append({'data': decoded_data, 'index': self.index})
-        self.index += 1
+        decoded_data = decoded_data.reshape(-1, 1024)
+        for c in decoded_data:
+            self.chunk.append({'data': c, 'index': self.index})
+            self.index += 1
         
-        if decoded_data.max() > 1000:
+        #if decoded_data.max() > 1000:
+        if decoded_data.max() > 0:
             self.age = self.block_length
         else:
             self.age = max(0, self.age - 1)
@@ -158,25 +161,22 @@ class AudioFilter():
         if self.age == 0:
             self.chunk = self.chunk[-self.margin_length:]
         else:
-            if len(self.chunk) >= self.block_length:
+            while len(self.chunk) >= self.block_length:
                 # push self.chunk[0:16]
                 self.worker.push_chunk(self.chunk[0:self.block_length])
 
                 # remove self.chunk[0:8]
-                self.chunk = self.chunk[self.block_length - 2 * self.margin_length:]
-
-        # Pop chunk to current list
-        ret = self.worker.pop_chunk()
-        for r in ret:
-            self.buffer.extend(r)
+                self.chunk = self.chunk[1:]
+        
+        ## Pop chunk to current list
+        ret = self.worker.pop_chunk(chunk_size)
         
         # Get head from current list
-        if len(self.buffer) > 0:
-            ret = self.buffer[0]
-            self.buffer = self.buffer[1:]
-            data = ret['data']
+        if ret is not None:
+            data = ret.astype(np.int16)
+            print(len(data), data.dtype, data.max())
         else:
-            data = np.zeros(1024, dtype=np.int16)
+            data = np.zeros(chunk_size, dtype=np.int16)
         
         out_data = data.tobytes()
 
@@ -186,7 +186,7 @@ class AudioFilter():
         self.p.terminate()
 
 if __name__ == "__main__":
-    block_length = 4
+    block_length = 8
     margin_length = 1
 
     worker_th = WorkerThread(block_length, margin_length)
