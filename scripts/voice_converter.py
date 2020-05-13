@@ -6,6 +6,7 @@ import threading
 import librosa
 import pyworld
 
+# https://tam5917.hatenablog.com/entry/2019/04/28/123934 
 def convert(signal):
     f0_rate = 2.4
     sp_rate = 0.78
