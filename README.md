@@ -10,6 +10,8 @@
 
 ![image](https://user-images.githubusercontent.com/14243883/81827836-1dfbaf00-9574-11ea-85b8-835556957d53.png)
 
+※CamTwistは使えなくなったので、現在ではOBS Studioを利用しています。
+
 ## 必要環境およびライブラリ
 
 ## ビルド
@@ -47,7 +49,7 @@ $ ./Demo
 
 ### Zoom連携
 
-- CamTwistを開き、Desktop+から`Confine to Application Window`をチェック、`Select from existing windows`の中からDemoを選択
+- ~CamTwist~OBSを開き、Desktop+から`Confine to Application Window`をチェック、`Select from existing windows`の中からDemoを選択
 - Zoomの音声入力をBlackholeに、ビデオ入力をCamTwistに設定
 
 ## 画面イメージ
